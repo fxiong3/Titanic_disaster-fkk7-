@@ -1,8 +1,0 @@
-#!/Users/xiongfeng/Desktop/FALL_2025/MLDS400/HW3/Titanic_disaster-fkk7-/fx17/bin/python3
-# -*- coding: utf-8 -*-
-import re
-import sys
-from fontTools.__main__ import main
-if __name__ == '__main__':
-    sys.argv[0] = re.sub(r'(-script\.pyw|\.exe)?$', '', sys.argv[0])
-    sys.exit(main())
