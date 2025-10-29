@@ -1,0 +1,13 @@
+data/
+titanic/
+*.csv
+*.tsv
+.DS_Store
+__pycache__/
+*.pyc
+venv/
+.env
+.Rhistory
+.RData
+*.ipynb
+fx17/
