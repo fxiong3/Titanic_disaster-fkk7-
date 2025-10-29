@@ -11,12 +11,3 @@ venv/
 .RData
 *.ipynb
 fx17/
-.DS_Store
-__pycache__/
-*.pyc
-fx17/
-.DS_Store
-data/
-*.csv
-
-
