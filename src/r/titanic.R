@@ -1,119 +1,150 @@
 suppressPackageStartupMessages({
-  library(readr)        # small & fast CSV reader
-  library(fastDummies)  # light-weight one-hot encoder
+  library(readr)
+  library(dplyr)
+  library(fastDummies)
 })
 
-# ====== Load train.csv ======
-cat("\nLoading train.csv ...\n")
-train <- readr::read_csv("/data/train.csv", show_col_types = FALSE)
-cat("Train shape:", paste(dim(train), collapse = " x"), "\n")
-cat("Train columns:", paste(names(train), collapse = ", "), "\n")
+DATA_DIR <- "/data"
 
-# ====== Q14. Explore / clean ======
-cat("\nExploring / cleaning train ...\n")
-miss_count <- sapply(train, function(x) sum(is.na(x) | (is.character(x) & x == "")))
-cat("Missing values per column (train):\n"); print(miss_count)
-
-# Drop Cabin (if present)
-if ("Cabin" %in% names(train)) {
-  train <- train[, setdiff(names(train), "Cabin")]
-  cat("Dropped column: Cabin\n")
+# ---------- helpers ----------
+print_missing <- function(df, title) {
+  cat(paste0("\nMissing values per column (", title, "):\n"))
+  print(sapply(df, function(x) sum(is.na(x) | (is.character(x) & x == ""))))
 }
 
-# Fill Age median; Embarked blanks -> 'S'
-age_na_before <- sum(is.na(train$Age))
-train$Age[is.na(train$Age)] <- median(train$Age, na.rm = TRUE)
-cat("Filled Age (median). Before:", age_na_before,
-    " After:", sum(is.na(train$Age)), "\n")
+scale_fit <- function(df_num) {
+  mu  <- sapply(df_num, mean, na.rm = TRUE)
+  sdv <- sapply(df_num, sd,   na.rm = TRUE)
+  sdv[sdv == 0] <- 1
+  list(mu = mu, sd = sdv)
+}
+scale_apply <- function(df, stats) {
+  out <- df
+  for (nm in names(stats$mu)) {
+    out[[nm]] <- (out[[nm]] - stats$mu[[nm]]) / stats$sd[[nm]]
+  }
+  out
+}
 
-emb_na_before <- sum(is.na(train$Embarked) | train$Embarked == "")
-train$Embarked[is.na(train$Embarked) | train$Embarked == ""] <- "S"
-cat("Filled Embarked='S'. Before:", emb_na_before,
-    " After:", sum(is.na(train$Embarked) | train$Embarked == ""), "\n")
+# 清洗函数（train / test 共用）
+clean_titanic <- function(df, is_train = TRUE) {
+  # 1) 丢弃 Cabin（若存在）
+  if ("Cabin" %in% names(df)) {
+    df <- df %>% select(-Cabin)
+    cat("Dropped column: Cabin\n")
+  }
 
-# Encode Sex
-train$Sex <- ifelse(train$Sex == "male", 0L, 1L)
+  # 2) 填充 Age / Fare / Embarked
+  if ("Age" %in% names(df)) {
+    before <- sum(is.na(df$Age))
+    med    <- median(df$Age, na.rm = TRUE)
+    df     <- df %>% mutate(Age = ifelse(is.na(Age), med, Age))
+    cat("Filled Age median. Before:", before, " After:", sum(is.na(df$Age)), "\n")
+  }
+  if ("Fare" %in% names(df)) {
+    before <- sum(is.na(df$Fare))
+    med    <- median(df$Fare, na.rm = TRUE)
+    df     <- df %>% mutate(Fare = ifelse(is.na(Fare), med, Fare))
+    cat("Filled Fare median. Before:", before, " After:", sum(is.na(df$Fare)), "\n")
+  }
+  if ("Embarked" %in% names(df)) {
+    before <- sum(is.na(df$Embarked) | df$Embarked == "")
+    df     <- df %>%
+      mutate(Embarked = ifelse(is.na(Embarked) | Embarked == "", "S", Embarked))
+    cat("Filled Embarked='S'. Before:", before,
+        " After:", sum(is.na(df$Embarked) | df$Embarked == ""), "\n")
+  }
 
-# One-hot for Embarked with S as reference
-train$Embarked <- factor(train$Embarked, levels = c("S","C","Q"))
-train <- fastDummies::dummy_cols(
-  train,
-  select_columns = "Embarked",
-  remove_selected_columns = TRUE,
-  remove_first_dummy = TRUE  # drops 'S' because it's the first level
-)
-# Columns now include Embarked_C and Embarked_Q
+  # 3) Sex 数值化
+  if ("Sex" %in% names(df)) {
+    df <- df %>% mutate(Sex = ifelse(Sex == "male", 0L, 1L))
+  }
 
-cat("Columns after encoding (train):\n"); print(names(train))
+  # 4) One-hot for Embarked（以 S 为基准）
+  if ("Embarked" %in% names(df)) {
+    df <- df %>%
+      mutate(Embarked = factor(Embarked, levels = c("S", "C", "Q"))) %>%
+      fastDummies::dummy_cols(
+        select_columns = "Embarked",
+        remove_selected_columns = TRUE,
+        remove_first_dummy = TRUE # 删除 S，保留 Embarked_C / Embarked_Q
+      )
+  }
 
-# ====== Q15. Logistic regression on train ======
+  df
+}
+
+# ========== 13. Load train.csv ==========
+cat("\nLoading train.csv ...\n")
+train <- readr::read_csv(file.path(DATA_DIR, "train.csv"), show_col_types = FALSE)
+cat("Train shape:", paste(dim(train), collapse = " x"), "\n")
+cat("Train columns:", paste(names(train), collapse = ", "), "\n")
+print_missing(train, "train")
+
+# ========== 14. Explore / clean ==========
+cat("\nExploring / cleaning train ...\n")
+train <- clean_titanic(train, is_train = TRUE)
+cat("\nData cleaned! New shape:", paste(dim(train), collapse = " x"), "\n")
+cat("Columns:", paste(names(train), collapse = ", "), "\n")
+
+# ========== 15. Logistic regression on training set ==========
 features <- c("Pclass","Sex","Age","SibSp","Parch","Fare","Embarked_C","Embarked_Q")
 cat("\nUsing features:", paste(features, collapse = ", "), "\n")
 
-X <- train[, features]
+# 保证 dummy 列存在
+for (nm in c("Embarked_C","Embarked_Q")) {
+  if (!nm %in% names(train)) train[[nm]] <- 0L
+}
+
+X <- train[, features, drop = FALSE]
 y <- train$Survived
 
-# Scale numerics (mirror your Python flow)
-num_cols <- sapply(X, is.numeric)
-mu  <- sapply(X[, num_cols, drop = FALSE], mean)
-sdv <- sapply(X[, num_cols, drop = FALSE], sd); sdv[sdv == 0] <- 1
 
-scale_df <- function(df, mu, sdv) {
-  out <- df
-  for (nm in names(mu)) out[[nm]] <- (out[[nm]] - mu[[nm]]) / sdv[[nm]]
-  out
-}
+num_cols <- names(X)[sapply(X, is.numeric)]
+stats    <- scale_fit(X[, num_cols, drop = FALSE])
 X_scaled <- X
-X_scaled[, names(mu)] <- scale_df(X[, names(mu), drop = FALSE], mu, sdv)[, names(mu)]
+X_scaled[, num_cols] <- scale_apply(X[, num_cols, drop = FALSE], stats)
 
-fit <- glm(y ~ ., data = data.frame(y = y, X_scaled), family = binomial())
+fit <- glm(y ~ ., data = cbind(y = y, X_scaled), family = binomial())
+cat("Model training complete.\n")
 
-# ====== Q16. Training accuracy ======
+# ========== 16. Training accuracy ==========
 p_train <- ifelse(predict(fit, type = "response") > 0.5, 1L, 0L)
 train_acc <- mean(p_train == y)
 cat("Training accuracy:", sprintf("%.4f", train_acc), "\n")
 
-# ====== Q17–18. Test set ======
+# ========== 17–18. Test: load / predict / agreement ==========
 cat("\nLoading test.csv ...\n")
-test <- readr::read_csv("/data/test.csv", show_col_types = FALSE)
+test <- readr::read_csv(file.path(DATA_DIR, "test.csv"), show_col_types = FALSE)
 cat("Test shape:", paste(dim(test), collapse = " x"), "\n")
-cat("Missing values per column (test):\n")
-print(sapply(test, function(x) sum(is.na(x) | (is.character(x) & x == ""))))
+print_missing(test, "test")
 
-# Same cleaning
-if ("Cabin" %in% names(test)) test <- test[, setdiff(names(test), "Cabin")]
-test$Age[is.na(test$Age)]   <- median(test$Age, na.rm = TRUE)
-test$Fare[is.na(test$Fare)] <- median(test$Fare, na.rm = TRUE)
-test$Embarked[is.na(test$Embarked) | test$Embarked == ""] <- "S"
-test$Sex <- ifelse(test$Sex == "male", 0L, 1L)
+cat("\nCleaning test ...\n")
+test <- clean_titanic(test, is_train = FALSE)
 
-test$Embarked <- factor(test$Embarked, levels = c("S","C","Q"))
-test <- fastDummies::dummy_cols(
-  test,
-  select_columns = "Embarked",
-  remove_selected_columns = TRUE,
-  remove_first_dummy = TRUE   # drop 'S'
-)
-
-# Ensure missing dummy columns exist (safety)
+# 对齐列（确保 Embarked_C / Embarked_Q 存在）
 for (nm in c("Embarked_C","Embarked_Q")) {
   if (!nm %in% names(test)) test[[nm]] <- 0L
 }
 
-X_test <- test[, features]
+X_test <- test[, features, drop = FALSE]
 X_test_scaled <- X_test
-for (nm in names(mu)) X_test_scaled[[nm]] <- (X_test[[nm]] - mu[[nm]]) / sdv[[nm]]
+X_test_scaled[, num_cols] <- scale_apply(X_test[, num_cols, drop = FALSE], stats)
 
 p_test <- ifelse(predict(fit, newdata = X_test_scaled, type = "response") > 0.5, 1L, 0L)
 cat("First 10 test predictions:", paste(p_test[1:min(10, length(p_test))], collapse = " "), "\n")
 
-# Agreement with gender_submission
-cat("\nComparing with gender_submission.csv ...\n")
-gender <- readr::read_csv("/data/gender_submission.csv", show_col_types = FALSE)
-merged <- merge(
-  data.frame(PassengerId = test$PassengerId, Predicted = p_test),
-  as.data.frame(gender), by = "PassengerId", all = FALSE
-)
-cat("Merged rows:", nrow(merged), "\n")
-agreement <- mean(merged$Predicted == merged$Survived)
-cat("Agreement with gender_submission.csv:", sprintf("%.4f", agreement), "\n")
+# Agreement vs gender_submission.csv
+gender_path <- file.path(DATA_DIR, "gender_submission.csv")
+if (file.exists(gender_path)) {
+  gender <- readr::read_csv(gender_path, show_col_types = FALSE)
+  merged <- merge(
+    data.frame(PassengerId = test$PassengerId, Predicted = p_test),
+    gender, by = "PassengerId", all = FALSE
+  )
+  cat("Merged rows:", nrow(merged), "\n")
+  agreement <- mean(merged$Predicted == merged$Survived)
+  cat("Agreement with gender_submission.csv:", sprintf("%.4f", agreement), "\n")
+} else {
+  cat("gender_submission.csv not found; skipping agreement metric.\n")
+}
